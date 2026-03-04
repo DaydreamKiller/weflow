@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import { TableVirtuoso } from 'react-virtuoso'
 import { createPortal } from 'react-dom'
@@ -471,16 +471,10 @@ const matchesContactTab = (contact: ContactInfo, tab: ConversationTab): boolean 
 }
 
 const createTaskId = (): string => `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-const createExportDiagTraceId = (): string => `export-card-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
 const CONTACT_ENRICH_TIMEOUT_MS = 7000
 const EXPORT_SNS_STATS_CACHE_STALE_MS = 12 * 60 * 60 * 1000
 const EXPORT_AVATAR_ENRICH_BATCH_SIZE = 80
-const CONTACTS_LIST_VIRTUAL_ROW_HEIGHT = 76
-const CONTACTS_LIST_VIRTUAL_OVERSCAN = 10
 const DEFAULT_CONTACTS_LOAD_TIMEOUT_MS = 3000
-const EXPORT_CARD_DIAG_MAX_FRONTEND_LOGS = 1500
-const EXPORT_CARD_DIAG_STALL_MS = 3200
-const EXPORT_CARD_DIAG_POLL_INTERVAL_MS = 1200
 const EXPORT_REENTER_SESSION_SOFT_REFRESH_MS = 5 * 60 * 1000
 const EXPORT_REENTER_CONTACTS_SOFT_REFRESH_MS = 5 * 60 * 1000
 const EXPORT_REENTER_SNS_SOFT_REFRESH_MS = 3 * 60 * 1000
@@ -566,64 +560,6 @@ interface SessionExportCacheMeta {
   stale: boolean
   includeRelations: boolean
   source: 'memory' | 'disk' | 'fresh'
-}
-
-type ExportCardDiagFilter = 'all' | 'frontend' | 'main' | 'backend' | 'worker' | 'warn' | 'error'
-
-type ExportCardDiagSource = 'frontend' | 'main' | 'backend' | 'worker'
-type ExportCardDiagLevel = 'debug' | 'info' | 'warn' | 'error'
-type ExportCardDiagStatus = 'running' | 'done' | 'failed' | 'timeout'
-
-interface ExportCardDiagLogEntry {
-  id: string
-  ts: number
-  source: ExportCardDiagSource
-  level: ExportCardDiagLevel
-  message: string
-  traceId?: string
-  stepId?: string
-  stepName?: string
-  status?: ExportCardDiagStatus
-  durationMs?: number
-  data?: Record<string, unknown>
-}
-
-interface ExportCardDiagActiveStep {
-  traceId: string
-  stepId: string
-  stepName: string
-  source: ExportCardDiagSource
-  elapsedMs: number
-  stallMs: number
-  startedAt: number
-  lastUpdatedAt: number
-  message?: string
-}
-
-interface ExportCardDiagSnapshotState {
-  logs: ExportCardDiagLogEntry[]
-  activeSteps: ExportCardDiagActiveStep[]
-  summary: {
-    totalLogs: number
-    activeStepCount: number
-    errorCount: number
-    warnCount: number
-    timeoutCount: number
-    lastUpdatedAt: number
-  }
-}
-
-const defaultExportCardDiagSnapshot: ExportCardDiagSnapshotState = {
-  logs: [],
-  activeSteps: [],
-  summary: {
-    totalLogs: 0,
-    activeStepCount: 0,
-    errorCount: 0,
-    warnCount: 0,
-    timeoutCount: 0,
-    lastUpdatedAt: 0
-  }
 }
 
 const withTimeout = async <T,>(promise: Promise<T>, timeoutMs: number): Promise<T | null> => {
@@ -890,8 +826,6 @@ function ExportPage() {
   const [sessionMessageCounts, setSessionMessageCounts] = useState<Record<string, number>>({})
   const [isLoadingSessionCounts, setIsLoadingSessionCounts] = useState(false)
   const [sessionContentMetrics, setSessionContentMetrics] = useState<Record<string, SessionContentMetric>>({})
-  const [contactsListScrollTop, setContactsListScrollTop] = useState(0)
-  const [contactsListViewportHeight, setContactsListViewportHeight] = useState(480)
   const [contactsLoadTimeoutMs, setContactsLoadTimeoutMs] = useState(DEFAULT_CONTACTS_LOAD_TIMEOUT_MS)
   const [contactsLoadSession, setContactsLoadSession] = useState<ContactsLoadSession | null>(null)
   const [contactsLoadIssue, setContactsLoadIssue] = useState<ContactsLoadIssue | null>(null)
@@ -950,11 +884,6 @@ function ExportPage() {
     totalFriends: 0
   })
   const [hasSeededSnsStats, setHasSeededSnsStats] = useState(false)
-  const [showCardDiagnostics, setShowCardDiagnostics] = useState(false)
-  const [diagFilter, setDiagFilter] = useState<ExportCardDiagFilter>('all')
-  const [frontendDiagLogs, setFrontendDiagLogs] = useState<ExportCardDiagLogEntry[]>([])
-  const [backendDiagSnapshot, setBackendDiagSnapshot] = useState<ExportCardDiagSnapshotState>(defaultExportCardDiagSnapshot)
-  const [isExportCardDiagSyncing, setIsExportCardDiagSyncing] = useState(false)
   const [nowTick, setNowTick] = useState(Date.now())
   const tabCounts = useContactTypeCountsStore(state => state.tabCounts)
   const isSharedTabCountsLoading = useContactTypeCountsStore(state => state.isLoading)
@@ -975,7 +904,6 @@ function ExportPage() {
   const contactsLoadTimeoutTimerRef = useRef<number | null>(null)
   const contactsLoadTimeoutMsRef = useRef(DEFAULT_CONTACTS_LOAD_TIMEOUT_MS)
   const contactsAvatarCacheRef = useRef<Record<string, configService.ContactsAvatarCacheEntry>>({})
-  const contactsListRef = useRef<HTMLDivElement>(null)
   const detailRequestSeqRef = useRef(0)
   const sessionsRef = useRef<SessionRow[]>([])
   const contactsListSizeRef = useRef(0)
@@ -987,63 +915,6 @@ function ExportPage() {
   const hasBaseConfigReadyRef = useRef(false)
   const sessionCountRequestIdRef = useRef(0)
   const activeTabRef = useRef<ConversationTab>('private')
-
-  const appendFrontendDiagLog = useCallback((entry: ExportCardDiagLogEntry) => {
-    setFrontendDiagLogs(prev => {
-      const next = [...prev, entry]
-      if (next.length > EXPORT_CARD_DIAG_MAX_FRONTEND_LOGS) {
-        return next.slice(next.length - EXPORT_CARD_DIAG_MAX_FRONTEND_LOGS)
-      }
-      return next
-    })
-  }, [])
-
-  const logFrontendDiag = useCallback((input: {
-    source?: ExportCardDiagSource
-    level?: ExportCardDiagLevel
-    message: string
-    traceId?: string
-    stepId?: string
-    stepName?: string
-    status?: ExportCardDiagStatus
-    durationMs?: number
-    data?: Record<string, unknown>
-  }) => {
-    const ts = Date.now()
-    appendFrontendDiagLog({
-      id: `frontend-diag-${ts}-${Math.random().toString(36).slice(2, 8)}`,
-      ts,
-      source: input.source || 'frontend',
-      level: input.level || 'info',
-      message: input.message,
-      traceId: input.traceId,
-      stepId: input.stepId,
-      stepName: input.stepName,
-      status: input.status,
-      durationMs: input.durationMs,
-      data: input.data
-    })
-  }, [appendFrontendDiagLog])
-
-  const fetchExportCardDiagnosticsSnapshot = useCallback(async (limit = 1200) => {
-    setIsExportCardDiagSyncing(true)
-    try {
-      const snapshot = await window.electronAPI.diagnostics.getExportCardLogs({ limit })
-      if (!snapshot || typeof snapshot !== 'object') return
-      setBackendDiagSnapshot(snapshot as ExportCardDiagSnapshotState)
-    } catch (error) {
-      logFrontendDiag({
-        level: 'warn',
-        message: '拉取后端诊断日志失败',
-        stepId: 'frontend-sync-backend-diag',
-        stepName: '同步后端诊断日志',
-        status: 'failed',
-        data: { error: String(error) }
-      })
-    } finally {
-      setIsExportCardDiagSyncing(false)
-    }
-  }, [logFrontendDiag])
 
   const ensureExportCacheScope = useCallback(async (): Promise<string> => {
     if (exportCacheScopeReadyRef.current) {
@@ -1968,15 +1839,6 @@ function ExportPage() {
   }, [isExportRoute, ensureSharedTabCountsLoaded, loadBaseConfig, loadSessions, loadSnsStats])
 
   useEffect(() => {
-    if (!isExportRoute || !showCardDiagnostics) return
-    void fetchExportCardDiagnosticsSnapshot(1600)
-    const timer = window.setInterval(() => {
-      void fetchExportCardDiagnosticsSnapshot(1600)
-    }, EXPORT_CARD_DIAG_POLL_INTERVAL_MS)
-    return () => window.clearInterval(timer)
-  }, [isExportRoute, showCardDiagnostics, fetchExportCardDiagnosticsSnapshot])
-
-  useEffect(() => {
     if (isExportRoute) return
     // 导出页隐藏时停止后台联系人补齐请求，避免与通讯录页面查询抢占。
     sessionLoadTokenRef.current = Date.now()
@@ -2831,147 +2693,6 @@ function ExportPage() {
     return [...sessionCards, snsCard]
   }, [sessions, lastExportByContent, snsStats, lastSnsExportPostCount])
 
-  const mergedCardDiagLogs = useMemo(() => {
-    const merged = [...backendDiagSnapshot.logs, ...frontendDiagLogs]
-    merged.sort((a, b) => (b.ts - a.ts) || a.id.localeCompare(b.id))
-    return merged
-  }, [backendDiagSnapshot.logs, frontendDiagLogs])
-
-  const latestCardDiagTraceId = useMemo(() => {
-    for (const item of mergedCardDiagLogs) {
-      const traceId = String(item.traceId || '').trim()
-      if (traceId) return traceId
-    }
-    return ''
-  }, [mergedCardDiagLogs])
-
-  const cardDiagTraceSteps = useMemo(() => {
-    if (!latestCardDiagTraceId) return [] as Array<{
-      traceId: string
-      stepId: string
-      stepName: string
-      source: ExportCardDiagSource
-      status: ExportCardDiagStatus
-      startedAt: number
-      endedAt?: number
-      durationMs?: number
-      lastUpdatedAt: number
-      message: string
-      stalled: boolean
-    }>
-
-    const traceLogs = mergedCardDiagLogs
-      .filter(item => item.traceId === latestCardDiagTraceId && item.stepId && item.stepName)
-      .sort((a, b) => a.ts - b.ts)
-
-    const stepMap = new Map<string, {
-      traceId: string
-      stepId: string
-      stepName: string
-      source: ExportCardDiagSource
-      status: ExportCardDiagStatus
-      startedAt: number
-      endedAt?: number
-      durationMs?: number
-      lastUpdatedAt: number
-      message: string
-    }>()
-
-    for (const item of traceLogs) {
-      const stepId = String(item.stepId || '').trim()
-      if (!stepId) continue
-      const prev = stepMap.get(stepId)
-      const nextStatus: ExportCardDiagStatus = item.status || prev?.status || 'running'
-      const startedAt = prev?.startedAt || item.ts
-      const endedAt = nextStatus === 'done' || nextStatus === 'failed' || nextStatus === 'timeout'
-        ? item.ts
-        : prev?.endedAt
-      const durationMs = typeof item.durationMs === 'number'
-        ? item.durationMs
-        : endedAt
-          ? Math.max(0, endedAt - startedAt)
-          : undefined
-      stepMap.set(stepId, {
-        traceId: latestCardDiagTraceId,
-        stepId,
-        stepName: String(item.stepName || stepId),
-        source: item.source,
-        status: nextStatus,
-        startedAt,
-        endedAt,
-        durationMs,
-        lastUpdatedAt: item.ts,
-        message: item.message
-      })
-    }
-
-    const now = Date.now()
-    return Array.from(stepMap.values()).map(step => ({
-      ...step,
-      stalled: step.status === 'running' && now - step.lastUpdatedAt >= EXPORT_CARD_DIAG_STALL_MS
-    }))
-  }, [mergedCardDiagLogs, latestCardDiagTraceId])
-
-  const cardDiagRunningStepCount = useMemo(
-    () => cardDiagTraceSteps.filter(step => step.status === 'running').length,
-    [cardDiagTraceSteps]
-  )
-  const cardDiagStalledStepCount = useMemo(
-    () => cardDiagTraceSteps.filter(step => step.stalled).length,
-    [cardDiagTraceSteps]
-  )
-
-  const filteredCardDiagLogs = useMemo(() => {
-    return mergedCardDiagLogs.filter((item) => {
-      if (diagFilter === 'all') return true
-      if (diagFilter === 'warn') return item.level === 'warn'
-      if (diagFilter === 'error') return item.level === 'error' || item.status === 'failed' || item.status === 'timeout'
-      return item.source === diagFilter
-    })
-  }, [mergedCardDiagLogs, diagFilter])
-
-  const clearCardDiagnostics = useCallback(async () => {
-    setFrontendDiagLogs([])
-    setBackendDiagSnapshot(defaultExportCardDiagSnapshot)
-    try {
-      await window.electronAPI.diagnostics.clearExportCardLogs()
-    } catch (error) {
-      logFrontendDiag({
-        level: 'warn',
-        message: '清空后端诊断日志失败',
-        stepId: 'frontend-clear-diagnostics',
-        stepName: '清空诊断日志',
-        status: 'failed',
-        data: { error: String(error) }
-      })
-    }
-  }, [logFrontendDiag])
-
-  const exportCardDiagnosticsLogs = useCallback(async () => {
-    const now = new Date()
-    const stamp = `${now.getFullYear()}${`${now.getMonth() + 1}`.padStart(2, '0')}${`${now.getDate()}`.padStart(2, '0')}-${`${now.getHours()}`.padStart(2, '0')}${`${now.getMinutes()}`.padStart(2, '0')}${`${now.getSeconds()}`.padStart(2, '0')}`
-    const defaultDir = exportFolder || await window.electronAPI.app.getDownloadsPath()
-    const saveResult = await window.electronAPI.dialog.saveFile({
-      title: '导出导出卡片诊断日志',
-      defaultPath: `${defaultDir}/weflow-export-card-diagnostics-${stamp}.jsonl`,
-      filters: [
-        { name: 'JSON Lines', extensions: ['jsonl'] },
-        { name: 'Text', extensions: ['txt'] }
-      ]
-    })
-    if (saveResult.canceled || !saveResult.filePath) return
-
-    const result = await window.electronAPI.diagnostics.exportExportCardLogs({
-      filePath: saveResult.filePath,
-      frontendLogs: frontendDiagLogs
-    })
-    if (result.success) {
-      window.alert(`导出成功\\n日志：${result.filePath}\\n摘要：${result.summaryPath || '未生成'}\\n总条数：${result.count || 0}`)
-    } else {
-      window.alert(`导出失败：${result.error || '未知错误'}`)
-    }
-  }, [exportFolder, frontendDiagLogs])
-
   const activeTabLabel = useMemo(() => {
     if (activeTab === 'private') return '私聊'
     if (activeTab === 'group') return '群聊'
@@ -3404,54 +3125,6 @@ function ExportPage() {
       contact.avatarUrl ? count + 1 : count
     ), 0)
   }, [contactsList])
-  useEffect(() => {
-    if (!contactsListRef.current) return
-    contactsListRef.current.scrollTop = 0
-    setContactsListScrollTop(0)
-  }, [activeTab, searchKeyword])
-
-  useEffect(() => {
-    const node = contactsListRef.current
-    if (!node) return
-    const updateViewportHeight = () => {
-      setContactsListViewportHeight(Math.max(node.clientHeight, CONTACTS_LIST_VIRTUAL_ROW_HEIGHT))
-    }
-    updateViewportHeight()
-    const observer = new ResizeObserver(() => updateViewportHeight())
-    observer.observe(node)
-    return () => observer.disconnect()
-  }, [filteredContacts.length, isContactsListLoading])
-
-  useEffect(() => {
-    const maxScroll = Math.max(0, filteredContacts.length * CONTACTS_LIST_VIRTUAL_ROW_HEIGHT - contactsListViewportHeight)
-    if (contactsListScrollTop <= maxScroll) return
-    setContactsListScrollTop(maxScroll)
-    if (contactsListRef.current) {
-      contactsListRef.current.scrollTop = maxScroll
-    }
-  }, [filteredContacts.length, contactsListViewportHeight, contactsListScrollTop])
-
-  const { startIndex: contactStartIndex, endIndex: contactEndIndex } = useMemo(() => {
-    if (filteredContacts.length === 0) {
-      return { startIndex: 0, endIndex: 0 }
-    }
-    const baseStart = Math.floor(contactsListScrollTop / CONTACTS_LIST_VIRTUAL_ROW_HEIGHT)
-    const visibleCount = Math.ceil(contactsListViewportHeight / CONTACTS_LIST_VIRTUAL_ROW_HEIGHT)
-    const nextStart = Math.max(0, baseStart - CONTACTS_LIST_VIRTUAL_OVERSCAN)
-    const nextEnd = Math.min(filteredContacts.length, nextStart + visibleCount + CONTACTS_LIST_VIRTUAL_OVERSCAN * 2)
-    return {
-      startIndex: nextStart,
-      endIndex: nextEnd
-    }
-  }, [filteredContacts.length, contactsListViewportHeight, contactsListScrollTop])
-
-  const visibleContacts = useMemo(() => {
-    return filteredContacts.slice(contactStartIndex, contactEndIndex)
-  }, [filteredContacts, contactStartIndex, contactEndIndex])
-
-  const onContactsListScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
-    setContactsListScrollTop(event.currentTarget.scrollTop)
-  }, [])
 
   const contactsIssueElapsedMs = useMemo(() => {
     if (!contactsLoadIssue) return 0
@@ -3912,153 +3585,11 @@ function ExportPage() {
                   openContentExport(card.type)
                 }}
               >
-                {isCardRunning ? '导出中' : '导出'}
+                {isCardRunning ? '批量导出中' : '批量导出'}
               </button>
             </div>
           )
         })}
-      </div>
-
-      <div className="export-card-diagnostics-section">
-        <div className="diag-panel-header">
-          <div className="diag-panel-title">
-            <span>卡片统计诊断日志</span>
-            <span className="diag-panel-subtitle">仅用于当前 6 个卡片排查</span>
-          </div>
-          <div className="diag-panel-actions">
-            <button className="secondary-btn" type="button" onClick={() => setShowCardDiagnostics(prev => !prev)}>
-              {showCardDiagnostics ? '收起日志' : '查看日志'}
-            </button>
-            {showCardDiagnostics && (
-              <>
-                <button
-                  className="secondary-btn"
-                  type="button"
-                  onClick={() => void fetchExportCardDiagnosticsSnapshot(1600)}
-                  disabled={isExportCardDiagSyncing}
-                >
-                  <RefreshCw size={14} className={isExportCardDiagSyncing ? 'spin' : ''} />
-                  刷新
-                </button>
-                <button className="secondary-btn" type="button" onClick={() => void clearCardDiagnostics()}>
-                  清空
-                </button>
-                <button className="secondary-btn" type="button" onClick={() => void exportCardDiagnosticsLogs()}>
-                  <Download size={14} />
-                  导出日志
-                </button>
-              </>
-            )}
-          </div>
-        </div>
-
-        {showCardDiagnostics && (
-          <>
-            <div className="diag-overview-grid">
-              <div className="diag-overview-item">
-                <span>日志总数</span>
-                <strong>{backendDiagSnapshot.summary.totalLogs + frontendDiagLogs.length}</strong>
-              </div>
-              <div className="diag-overview-item">
-                <span>活跃步骤</span>
-                <strong>{backendDiagSnapshot.activeSteps.length}</strong>
-              </div>
-              <div className="diag-overview-item">
-                <span>当前运行步骤</span>
-                <strong>{cardDiagRunningStepCount}</strong>
-              </div>
-              <div className="diag-overview-item">
-                <span>疑似卡住</span>
-                <strong className={cardDiagStalledStepCount > 0 ? 'warn' : ''}>{cardDiagStalledStepCount}</strong>
-              </div>
-              <div className="diag-overview-item">
-                <span>最近告警</span>
-                <strong>{backendDiagSnapshot.summary.warnCount}</strong>
-              </div>
-              <div className="diag-overview-item">
-                <span>最近错误</span>
-                <strong className={backendDiagSnapshot.summary.errorCount > 0 ? 'warn' : ''}>{backendDiagSnapshot.summary.errorCount}</strong>
-              </div>
-            </div>
-
-            <div className="diag-step-chain">
-              <div className="diag-step-chain-title">
-                当前链路
-                {latestCardDiagTraceId ? ` · trace=${latestCardDiagTraceId}` : ''}
-              </div>
-              {cardDiagTraceSteps.length === 0 ? (
-                <div className="diag-empty">暂无链路步骤，请先触发一次卡片统计。</div>
-              ) : (
-                <div className="diag-step-list">
-                  {cardDiagTraceSteps.map((step, index) => (
-                    <div key={`${step.stepId}-${index}`} className={`diag-step-item ${step.status} ${step.stalled ? 'stalled' : ''}`}>
-                      <span className="diag-step-order">{index + 1}</span>
-                      <div className="diag-step-main">
-                        <div className="diag-step-name">{step.stepName}</div>
-                        <div className="diag-step-meta">
-                          <span>{step.source}</span>
-                          <span>{step.status}</span>
-                          <span>耗时 {step.durationMs ?? Math.max(0, Date.now() - step.startedAt)}ms</span>
-                          {step.stalled && <span className="warn">卡住 {Math.max(0, Date.now() - step.lastUpdatedAt)}ms</span>}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <div className="diag-log-toolbar">
-              {([
-                { value: 'all', label: '全部' },
-                { value: 'frontend', label: '前端' },
-                { value: 'main', label: '主进程' },
-                { value: 'backend', label: '后端' },
-                { value: 'worker', label: 'Worker' },
-                { value: 'warn', label: '告警' },
-                { value: 'error', label: '错误' }
-              ] as Array<{ value: ExportCardDiagFilter; label: string }>).map(item => (
-                <button
-                  key={item.value}
-                  type="button"
-                  className={`diag-filter-btn ${diagFilter === item.value ? 'active' : ''}`}
-                  onClick={() => setDiagFilter(item.value)}
-                >
-                  {item.label}
-                </button>
-              ))}
-            </div>
-
-            <div className="diag-log-list">
-              {filteredCardDiagLogs.length === 0 ? (
-                <div className="diag-empty">暂无日志</div>
-              ) : (
-                filteredCardDiagLogs.slice(0, 260).map(log => {
-                  const ms = `${log.ts % 1000}`.padStart(3, '0')
-                  const timeLabel = `${new Date(log.ts).toLocaleTimeString('zh-CN', { hour12: false })}.${ms}`
-                  return (
-                    <div key={`${log.id}-${timeLabel}`} className={`diag-log-item ${log.level}`}>
-                      <div className="diag-log-top">
-                        <span className="diag-log-time">{timeLabel}</span>
-                        <span className="diag-log-tag">{log.source}</span>
-                        <span className={`diag-log-tag ${log.level}`}>{log.level}</span>
-                        {log.status && <span className={`diag-log-tag ${log.status}`}>{log.status}</span>}
-                        {typeof log.durationMs === 'number' && <span className="diag-log-tag">耗时 {log.durationMs}ms</span>}
-                      </div>
-                      <div className="diag-log-message">{log.message}</div>
-                      {(log.stepName || log.traceId) && (
-                        <div className="diag-log-meta">
-                          {log.stepName && <span>{log.stepName}</span>}
-                          {log.traceId && <span>trace={log.traceId}</span>}
-                        </div>
-                      )}
-                    </div>
-                  )
-                })
-              )}
-            </div>
-          </>
-        )}
       </div>
 
       <div className="session-table-section">
@@ -4182,14 +3713,8 @@ function ExportPage() {
                   <span className="contacts-list-header-count">总消息数</span>
                   <span className="contacts-list-header-actions">操作</span>
                 </div>
-                <div className="contacts-list" ref={contactsListRef} onScroll={onContactsListScroll}>
-                  <div
-                    className="contacts-list-virtual"
-                    style={{ height: filteredContacts.length * CONTACTS_LIST_VIRTUAL_ROW_HEIGHT }}
-                  >
-                    {visibleContacts.map((contact, idx) => {
-                      const absoluteIndex = contactStartIndex + idx
-                      const top = absoluteIndex * CONTACTS_LIST_VIRTUAL_ROW_HEIGHT
+                <div className="contacts-list">
+                    {filteredContacts.map((contact) => {
                       const matchedSession = sessionRowByUsername.get(contact.username)
                       const canExport = Boolean(matchedSession?.hasSession)
                       const isRunning = canExport && runningSessionIds.has(contact.username)
@@ -4207,7 +3732,6 @@ function ExportPage() {
                         <div
                           key={contact.username}
                           className="contact-row"
-                          style={{ transform: `translateY(${top}px)` }}
                         >
                           <div className="contact-item">
                             <div className="contact-avatar">
@@ -4264,7 +3788,7 @@ function ExportPage() {
                                       <Loader2 size={14} className="spin" />
                                       导出中
                                     </>
-                                  ) : !canExport ? '暂无会话' : isQueued ? '排队中' : '导出'}
+                                  ) : !canExport ? '暂无会话' : isQueued ? '排队中' : '单会话导出'}
                                 </button>
                               </div>
                               {recent && <span className="row-export-time">{recent}</span>}
@@ -4273,7 +3797,6 @@ function ExportPage() {
                         </div>
                       )
                     })}
-                  </div>
                 </div>
               </>
             )}
