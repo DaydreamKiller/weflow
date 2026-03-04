@@ -3026,6 +3026,16 @@
     font-size: 12px;
     font-weight: 600;
     color: var(--text-secondary);
+
+    &.loading {
+      color: var(--text-tertiary);
+      font-weight: 500;
+    }
+
+    &.failed {
+      color: #b45309;
+      font-weight: 600;
+    }
   }
 }
 

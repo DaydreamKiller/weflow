@@ -260,6 +260,8 @@ interface SessionExportCacheMeta {
   source: 'memory' | 'disk' | 'fresh'
 }
 
+type GroupMessageCountStatus = 'loading' | 'ready' | 'failed'
+
 interface GroupPanelMember {
   username: string
   displayName: string
@@ -271,6 +273,7 @@ interface GroupPanelMember {
   isOwner?: boolean
   isFriend: boolean
   messageCount: number
+  messageCountStatus: GroupMessageCountStatus
 }
 
 interface SessionListCachePayload {
@@ -1131,7 +1134,10 @@ function ChatPage(props: ChatPageProps) {
     }
   }, [applySessionDetailStats, currentSessionId, isLoadingRelationStats])
 
-  const normalizeGroupPanelMembers = useCallback((payload: GroupPanelMember[]): GroupPanelMember[] => {
+  const normalizeGroupPanelMembers = useCallback((
+    payload: GroupPanelMember[],
+    options?: { messageCountStatus?: GroupMessageCountStatus }
+  ): GroupPanelMember[] => {
     const membersPayload = Array.isArray(payload) ? payload : []
     return membersPayload
       .map((member: GroupPanelMember): GroupPanelMember | null => {
@@ -1144,6 +1150,9 @@ function ChatPage(props: ChatPageProps) {
           member.nickname ||
           username
         )
+        const rawStatus = member.messageCountStatus
+        const normalizedStatus: GroupMessageCountStatus = options?.messageCountStatus
+          ?? (rawStatus === 'loading' || rawStatus === 'failed' ? rawStatus : 'ready')
 
         return {
           username,
@@ -1155,7 +1164,8 @@ function ChatPage(props: ChatPageProps) {
           groupNickname: member.groupNickname,
           isOwner: Boolean(member.isOwner),
           isFriend: Boolean(member.isFriend),
-          messageCount: Number.isFinite(member.messageCount) ? Math.max(0, Math.floor(member.messageCount)) : 0
+          messageCount: Number.isFinite(member.messageCount) ? Math.max(0, Math.floor(member.messageCount)) : 0,
+          messageCountStatus: normalizedStatus
         }
       })
       .filter((member: GroupPanelMember | null): member is GroupPanelMember => Boolean(member))
@@ -1166,7 +1176,8 @@ function ChatPage(props: ChatPageProps) {
         const friendDiff = Number(b.isFriend) - Number(a.isFriend)
         if (friendDiff !== 0) return friendDiff
 
-        if (a.messageCount !== b.messageCount) return b.messageCount - a.messageCount
+        const canSortByCount = a.messageCountStatus === 'ready' && b.messageCountStatus === 'ready'
+        if (canSortByCount && a.messageCount !== b.messageCount) return b.messageCount - a.messageCount
         return a.displayName.localeCompare(b.displayName, 'zh-Hans-CN')
       })
   }, [])
@@ -1240,6 +1251,21 @@ function ChatPage(props: ChatPageProps) {
       }
     }
   }, [])
+
+  const setGroupMembersCountStatus = useCallback((
+    status: GroupMessageCountStatus,
+    options?: { onlyWhenNotReady?: boolean }
+  ) => {
+    setGroupPanelMembers((prev) => {
+      if (!Array.isArray(prev) || prev.length === 0) return prev
+      if (options?.onlyWhenNotReady && prev.some((member) => member.messageCountStatus === 'ready')) {
+        return prev
+      }
+      const next = normalizeGroupPanelMembers(prev, { messageCountStatus: status })
+      const changed = next.some((member, index) => member.messageCountStatus !== prev[index]?.messageCountStatus)
+      return changed ? next : prev
+    })
+  }, [normalizeGroupPanelMembers])
 
   const syncGroupMembersMyCountFromDetail = useCallback((chatroomId: string, myMessageCount: number) => {
     if (!chatroomId || !chatroomId.includes('@chatroom')) return
@@ -1319,6 +1345,7 @@ function ChatPage(props: ChatPageProps) {
     const refreshMessageCountsInBackground = (forceRefresh: boolean) => {
       startedBackgroundRefresh = true
       setIsRefreshingGroupMembers(true)
+      setGroupMembersCountStatus('loading', { onlyWhenNotReady: true })
       void (async () => {
         try {
           const countsResult = await getGroupMembersPanelDataWithTimeout(
@@ -1329,10 +1356,14 @@ function ChatPage(props: ChatPageProps) {
           if (requestSeq !== groupMembersRequestSeqRef.current) return
           if (!countsResult.success || !Array.isArray(countsResult.data)) {
             setGroupMembersError('成员列表已加载，发言统计稍后再试')
+            setGroupMembersCountStatus('failed', { onlyWhenNotReady: true })
             return
           }
 
-          const membersWithCounts = normalizeGroupPanelMembers(countsResult.data as GroupPanelMember[])
+          const membersWithCounts = normalizeGroupPanelMembers(
+            countsResult.data as GroupPanelMember[],
+            { messageCountStatus: 'ready' }
+          )
           setGroupPanelMembers(membersWithCounts)
           syncGroupMyMessagesFromMembers(chatroomId, membersWithCounts)
           setGroupMembersError(null)
@@ -1341,6 +1372,7 @@ function ChatPage(props: ChatPageProps) {
         } catch {
           if (requestSeq !== groupMembersRequestSeqRef.current) return
           setGroupMembersError('成员列表已加载，发言统计稍后再试')
+          setGroupMembersCountStatus('failed', { onlyWhenNotReady: true })
         } finally {
           if (requestSeq === groupMembersRequestSeqRef.current) {
             setIsRefreshingGroupMembers(false)
@@ -1350,9 +1382,13 @@ function ChatPage(props: ChatPageProps) {
     }
 
     if (cacheFresh && cached) {
-      setGroupPanelMembers(cached.members)
+      const cachedMembers = normalizeGroupPanelMembers(
+        cached.members,
+        { messageCountStatus: cached.includeMessageCounts ? 'ready' : 'loading' }
+      )
+      setGroupPanelMembers(cachedMembers)
       if (cached.includeMessageCounts) {
-        syncGroupMyMessagesFromMembers(chatroomId, cached.members)
+        syncGroupMyMessagesFromMembers(chatroomId, cachedMembers)
       }
       setGroupMembersError(null)
       setGroupMembersLoadingHint('')
@@ -1368,9 +1404,13 @@ function ChatPage(props: ChatPageProps) {
 
     setGroupMembersError(null)
     if (hasCachedMembers && cached) {
-      setGroupPanelMembers(cached.members)
+      const cachedMembers = normalizeGroupPanelMembers(
+        cached.members,
+        { messageCountStatus: cached.includeMessageCounts ? 'ready' : 'loading' }
+      )
+      setGroupPanelMembers(cachedMembers)
       if (cached.includeMessageCounts) {
-        syncGroupMyMessagesFromMembers(chatroomId, cached.members)
+        syncGroupMyMessagesFromMembers(chatroomId, cachedMembers)
       }
       setIsRefreshingGroupMembers(true)
       setGroupMembersLoadingHint('')
@@ -1402,7 +1442,10 @@ function ChatPage(props: ChatPageProps) {
         return
       }
 
-      const members = normalizeGroupPanelMembers(membersResult.data as GroupPanelMember[])
+      const members = normalizeGroupPanelMembers(
+        membersResult.data as GroupPanelMember[],
+        { messageCountStatus: 'loading' }
+      )
       setGroupPanelMembers(members)
       setGroupMembersError(null)
       updateGroupMembersPanelCache(chatroomId, members, false)
@@ -3831,7 +3874,13 @@ function ChatPage(props: ChatPageProps) {
                               </span>
                             </div>
                           </div>
-                          <span className="group-member-count">{member.messageCount.toLocaleString()} 条</span>
+                          <span className={`group-member-count ${member.messageCountStatus}`}>
+                            {member.messageCountStatus === 'loading'
+                              ? '统计中'
+                              : member.messageCountStatus === 'failed'
+                                ? '统计失败'
+                                : `${member.messageCount.toLocaleString()} 条`}
+                          </span>
                         </div>
                       ))}
                     </div>
