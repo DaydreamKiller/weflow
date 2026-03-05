@@ -3984,14 +3984,16 @@ function ExportPage() {
                   >
                     清空
                   </button>
-                  <button
-                    className="selection-export-btn"
-                    type="button"
-                    onClick={openBatchExport}
-                    disabled={selectedCount === 0}
-                  >
-                    批量导出
-                  </button>
+                  {selectedCount > 0 && (
+                    <button
+                      className="selection-export-btn"
+                      type="button"
+                      onClick={openBatchExport}
+                    >
+                      <span>批量导出</span>
+                      <span className="selection-export-count">{selectedCount}</span>
+                    </button>
+                  )}
                 </div>
                 <div className="contacts-list-header">
                   <span className="contacts-list-header-select">选择</span>
