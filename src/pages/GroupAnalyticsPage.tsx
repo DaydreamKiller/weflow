@@ -62,9 +62,13 @@ function GroupAnalyticsPage() {
   const [groups, setGroups] = useState<GroupChatInfo[]>([])
   const [filteredGroups, setFilteredGroups] = useState<GroupChatInfo[]>([])
   const [isLoading, setIsLoading] = useState(true)
-  const [selectedGroup, setSelectedGroup] = useState<GroupChatInfo | null>(null)
+  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null)
   const [selectedFunction, setSelectedFunction] = useState<AnalysisFunction | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
+  const selectedGroup = useMemo(
+    () => (selectedGroupId ? groups.find(group => group.username === selectedGroupId) || null : null),
+    [groups, selectedGroupId]
+  )
 
   // 功能数据
   const [members, setMembers] = useState<GroupMember[]>([])
@@ -274,7 +278,7 @@ function GroupAnalyticsPage() {
     preselectAppliedRef.current = true
 
     if (matchedGroup) {
-      setSelectedGroup(matchedGroup)
+      setSelectedGroupId(matchedGroup.username)
       setSelectedFunction(null)
       setSearchQuery('')
     }
@@ -311,7 +315,7 @@ function GroupAnalyticsPage() {
     const handleChange = () => {
       setGroups([])
       setFilteredGroups([])
-      setSelectedGroup(null)
+      setSelectedGroupId(null)
       setSelectedFunction(null)
       setMembers([])
       setRankings([])
@@ -325,15 +329,13 @@ function GroupAnalyticsPage() {
   }, [loadExportPath, loadGroups])
 
   const handleGroupSelect = (group: GroupChatInfo) => {
-    if (selectedGroup?.username !== group.username) {
-      setSelectedGroup(group)
-      setSelectedFunction(null)
-      setSelectedExportMemberUsername('')
-      setMemberSearchKeyword('')
-      setShowMemberSelect(false)
-      setShowFormatSelect(false)
-      setShowDisplayNameSelect(false)
-    }
+    setSelectedGroupId(group.username)
+    setSelectedFunction(null)
+    setSelectedExportMemberUsername('')
+    setMemberSearchKeyword('')
+    setShowMemberSelect(false)
+    setShowFormatSelect(false)
+    setShowDisplayNameSelect(false)
   }
 
 
@@ -343,12 +345,12 @@ function GroupAnalyticsPage() {
     await loadFunctionData(func)
   }
 
-  const loadFunctionData = async (func: AnalysisFunction) => {
-    if (!selectedGroup) return
+  const loadFunctionData = async (func: AnalysisFunction, targetGroup: GroupChatInfo | null = selectedGroup) => {
+    if (!targetGroup) return
     const taskId = registerBackgroundTask({
       sourcePage: 'groupAnalytics',
       title: `群分析：${func}`,
-      detail: `正在读取 ${selectedGroup.displayName || selectedGroup.username} 的分析数据`,
+      detail: `正在读取 ${targetGroup.displayName || targetGroup.username} 的分析数据`,
       progressText: func,
       cancelable: true
     })
@@ -365,7 +367,7 @@ function GroupAnalyticsPage() {
             detail: '正在读取群成员列表',
             progressText: '成员列表'
           })
-          const result = await window.electronAPI.groupAnalytics.getGroupMembers(selectedGroup.username)
+          const result = await window.electronAPI.groupAnalytics.getGroupMembers(targetGroup.username)
           if (isBackgroundTaskCancelRequested(taskId)) {
             finishBackgroundTask(taskId, 'canceled', { detail: '已停止后续加载，群成员列表未继续写入' })
             return
@@ -382,7 +384,7 @@ function GroupAnalyticsPage() {
             detail: '正在读取导出成员列表',
             progressText: '成员导出'
           })
-          const result = await window.electronAPI.groupAnalytics.getGroupMembers(selectedGroup.username)
+          const result = await window.electronAPI.groupAnalytics.getGroupMembers(targetGroup.username)
           if (isBackgroundTaskCancelRequested(taskId)) {
             finishBackgroundTask(taskId, 'canceled', { detail: '已停止后续加载，成员导出列表未继续写入' })
             return
@@ -399,7 +401,7 @@ function GroupAnalyticsPage() {
             detail: '正在计算群消息排行',
             progressText: '消息排行'
           })
-          const result = await window.electronAPI.groupAnalytics.getGroupMessageRanking(selectedGroup.username, 20, startTime, endTime)
+          const result = await window.electronAPI.groupAnalytics.getGroupMessageRanking(targetGroup.username, 20, startTime, endTime)
           if (isBackgroundTaskCancelRequested(taskId)) {
             finishBackgroundTask(taskId, 'canceled', { detail: '已停止后续加载，群消息排行未继续写入' })
             return
@@ -416,7 +418,7 @@ function GroupAnalyticsPage() {
             detail: '正在计算群活跃时段',
             progressText: '活跃时段'
           })
-          const result = await window.electronAPI.groupAnalytics.getGroupActiveHours(selectedGroup.username, startTime, endTime)
+          const result = await window.electronAPI.groupAnalytics.getGroupActiveHours(targetGroup.username, startTime, endTime)
           if (isBackgroundTaskCancelRequested(taskId)) {
             finishBackgroundTask(taskId, 'canceled', { detail: '已停止后续加载，群活跃时段未继续写入' })
             return
@@ -433,7 +435,7 @@ function GroupAnalyticsPage() {
             detail: '正在统计群消息类型',
             progressText: '消息类型'
           })
-          const result = await window.electronAPI.groupAnalytics.getGroupMediaStats(selectedGroup.username, startTime, endTime)
+          const result = await window.electronAPI.groupAnalytics.getGroupMediaStats(targetGroup.username, startTime, endTime)
           if (isBackgroundTaskCancelRequested(taskId)) {
             finishBackgroundTask(taskId, 'canceled', { detail: '已停止后续加载，群消息类型统计未继续写入' })
             return
@@ -770,7 +772,7 @@ function GroupAnalyticsPage() {
           filteredGroups.map(group => (
             <div
               key={group.username}
-              className={`group-item ${selectedGroup?.username === group.username ? 'active' : ''}`}
+              className={`group-item ${selectedGroupId === group.username ? 'active' : ''}`}
               onClick={() => handleGroupSelect(group)}
             >
               <div className="group-avatar">
@@ -794,29 +796,37 @@ function GroupAnalyticsPage() {
         <div className="group-avatar large">
           <Avatar src={selectedGroup?.avatarUrl} name={selectedGroup?.displayName} size={80} />
         </div>
-        <h2>{selectedGroup?.displayName}</h2>
-        <p>{selectedGroup?.memberCount} 位成员</p>
+        <div className="selected-group-meta">
+          <span className="group-summary-label">已选择群聊</span>
+          <h2>{selectedGroup?.displayName}</h2>
+          <p>{selectedGroup?.memberCount} 位成员</p>
+        </div>
       </div>
       <div className="function-grid">
         <div className="function-card" onClick={() => handleFunctionSelect('members')}>
           <Users size={32} />
           <span>群成员查看</span>
+          <small>查看群成员列表和基础资料</small>
         </div>
         <div className="function-card" onClick={() => handleFunctionSelect('memberExport')}>
           <Download size={32} />
           <span>成员消息导出</span>
+          <small>按成员筛选并导出群聊记录</small>
         </div>
         <div className="function-card" onClick={() => handleFunctionSelect('ranking')}>
           <BarChart3 size={32} />
           <span>群聊发言排行</span>
+          <small>统计成员发言数量排行</small>
         </div>
         <div className="function-card" onClick={() => handleFunctionSelect('activeHours')}>
           <Clock size={32} />
           <span>群聊活跃时段</span>
+          <small>查看全天活跃时间分布</small>
         </div>
         <div className="function-card" onClick={() => handleFunctionSelect('mediaStats')}>
           <Image size={32} />
           <span>媒体内容统计</span>
+          <small>统计文本、图片、语音等类型</small>
         </div>
       </div>
     </div>
